@@ -58,7 +58,7 @@ It provides:
 ## Installation
 
 ```bash
-npm install -g @razroo/skyclaw
+npm install -g @razroo/automaton-skyclaw
 ```
 
 Or for local development:
