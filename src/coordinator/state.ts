@@ -9,6 +9,7 @@ import type {
 } from "../types.js";
 import { hasCapabilities, makeId, normalizeCapabilities, nowIso } from "../util.js";
 import { CoordinatorStorage } from "./storage.js";
+import type { StoredIdempotencyRecord } from "./storage.js";
 
 export interface CoordinatorStateOptions {
   leaseMs?: number;
@@ -260,6 +261,37 @@ export class CoordinatorState {
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
         .map((job) => structuredClone(job))
     };
+  }
+
+  getIdempotency(route: string, key: string): StoredIdempotencyRecord | undefined {
+    return this.storage?.getIdempotency(route, key);
+  }
+
+  saveIdempotency(
+    route: string,
+    key: string,
+    requestHash: string,
+    statusCode: number,
+    responseBody: unknown,
+    ttlMs: number
+  ): void {
+    if (!this.storage) return;
+    const createdAt = nowIso();
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    this.storage.saveIdempotency({
+      route,
+      key,
+      requestHash,
+      statusCode,
+      responseJson: JSON.stringify(responseBody),
+      createdAt,
+      expiresAt
+    });
+  }
+
+  purgeExpiredIdempotency(now: string = nowIso()): number {
+    if (!this.storage) return 0;
+    return this.storage.deleteExpiredIdempotency(now);
   }
 
   private bumpVersion(): number {

@@ -159,6 +159,17 @@ Jobs can request capabilities (`shell`, `automaton`, etc). Hosts only claim jobs
 - `GET /v1/state`
 - `GET /health`
 
+## Idempotency
+
+- Mutating endpoints support `X-Idempotency-Key`.
+- Implemented on:
+  - `POST /v1/hosts/register`
+  - `POST /v1/jobs`
+  - `POST /v1/jobs/:id/complete`
+- Repeating the same request with the same key returns the cached response.
+- Reusing the same key with different payload returns `409`.
+- Idempotency records are persisted in SQLite and survive coordinator restart.
+
 ## Next integration steps
 
 - Add signed host identities instead of shared token.
