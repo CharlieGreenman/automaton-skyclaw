@@ -1,5 +1,5 @@
 {
-  "name": "skyclaw",
+  "name": "@razroo/skyclaw",
   "version": "0.1.0",
   "description": "OpenClaw-hosted compute bridge for Automaton workloads",
   "type": "module",

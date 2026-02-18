@@ -7,31 +7,83 @@ It provides:
 - A host daemon that runs on OpenClaw machines, claims jobs, and executes them.
 - A small CLI to enqueue shell or automaton jobs.
 
+## Architecture
+
+```
+┌─────────────────┐                    ┌──────────────────────┐                    ┌─────────────────┐
+│   Automaton     │                    │  Skyclaw Coordinator │                    │  OpenClaw Host  │
+│   (Client)      │                    │    (Job Queue)       │                    │   (Worker)      │
+└────────┬────────┘                    └──────────┬───────────┘                    └────────┬────────┘
+         │                                        │                                         │
+         │  1. Enqueue Job                        │                                         │
+         │  POST /v1/jobs                         │                                         │
+         ├───────────────────────────────────────>│                                         │
+         │                                        │                                         │
+         │                                        │  2. Register & Heartbeat                │
+         │                                        │  POST /v1/hosts/register                │
+         │                                        │<────────────────────────────────────────┤
+         │                                        │                                         │
+         │                                        │  3. Claim Job                           │
+         │                                        │  POST /v1/hosts/:id/claim              │
+         │                                        │<────────────────────────────────────────┤
+         │                                        │                                         │
+         │                                        │  ─────Job Details─────>                 │
+         │                                        │                                         │
+         │                                        │                          4. Execute Job │
+         │                                        │                          (shell/automaton)
+         │                                        │                                         │
+         │                                        │  5. Complete Job                        │
+         │                                        │  POST /v1/jobs/:id/complete            │
+         │                                        │<────────────────────────────────────────┤
+         │                                        │                                         │
+         │  6. Job Results                        │                                         │
+         │<───────────────────────────────────────┤                                         │
+         │                                        │                                         │
+```
+
+## Component Roles
+
+| Component | Role | Key Functions |
+|-----------|------|---------------|
+| **Automaton (Client)** | Submits compute jobs that need execution | - Enqueues shell/automaton jobs<br>- Receives job results |
+| **Skyclaw Coordinator** | Central job queue and orchestrator | - Registers hosts<br>- Manages job queue<br>- Tracks job lifecycle<br>- Handles multi-node replication |
+| **OpenClaw Host (Worker)** | Executes jobs on local machines | - Claims jobs from coordinator<br>- Runs shell commands<br>- Executes automaton workloads<br>- Reports results back |
+
 ## Why this repo exists
 
 - `automaton`: autonomous agent runtime that needs paid compute.
 - `openclaw`: personal AI host/control plane people already run.
 - `skyclaw`: the glue that turns OpenClaw hosts into opt-in Automaton workers.
 
-## Quick start
+## Installation
 
-1. Install deps and build:
+```bash
+npm install -g @razroo/skyclaw
+```
+
+Or for local development:
 
 ```bash
 npm install
 npm run build
 ```
 
-2. Start the coordinator:
+## Quick start
+
+1. Start the coordinator:
 
 ```bash
 export SKYCLAW_TOKEN=change-me
 export SKYCLAW_COORDINATOR_NODE_ID=node-a
 export SKYCLAW_PEER_URLS=http://127.0.0.1:8788,http://127.0.0.1:8789
-node dist/cli.js coordinator
+export SKYCLAW_MIN_REPLICATIONS=100
+skyclaw coordinator
+
+# Or with local build:
+# node dist/cli.js coordinator
 ```
 
-3. Start a host on an OpenClaw machine:
+2. Start a host on an OpenClaw machine:
 
 ```bash
 export SKYCLAW_COORDINATOR_URL=http://127.0.0.1:8787
@@ -40,17 +92,24 @@ export SKYCLAW_TOKEN=change-me
 export SKYCLAW_CAPABILITIES=shell,automaton
 export SKYCLAW_ALLOWED_COMMANDS=automaton,node,bash,sh
 export SKYCLAW_DB_PATH=.skyclaw/coordinator.db
-node dist/cli.js host
+skyclaw host
+
+# Or with local build:
+# node dist/cli.js host
 ```
 
-4. Enqueue compute:
+3. Enqueue compute:
 
 ```bash
 # generic shell job
-node dist/cli.js enqueue-shell bash -lc "echo hello from skyclaw"
+skyclaw enqueue-shell bash -lc "echo hello from skyclaw"
 
 # automaton run job
-node dist/cli.js enqueue-automaton --run
+skyclaw enqueue-automaton --run
+
+# Or with local build:
+# node dist/cli.js enqueue-shell bash -lc "echo hello from skyclaw"
+# node dist/cli.js enqueue-automaton --run
 ```
 
 ## Job model
@@ -76,6 +135,8 @@ Jobs can request capabilities (`shell`, `automaton`, etc). Hosts only claim jobs
 - Hosts/clients can fail over across coordinators via `SKYCLAW_COORDINATOR_URLS`.
 - If one coordinator node goes down, another node can continue scheduling from replicated state.
 - If all coordinator disks are lost, state is lost.
+- Coordinator writes enforce a minimum replication target (`SKYCLAW_MIN_REPLICATIONS`, default `100`).
+- With `100`, each write requires `99` successful peer replication acknowledgements.
 
 ## Multi-node setup
 
@@ -84,6 +145,7 @@ Jobs can request capabilities (`shell`, `automaton`, etc). Hosts only claim jobs
 - Configure each coordinator with the others in `SKYCLAW_PEER_URLS`.
 - Point hosts and enqueuers at all coordinators using `SKYCLAW_COORDINATOR_URLS`.
 - Keep one shared `SKYCLAW_TOKEN` across the coordinator cluster.
+- For the default durability policy, each coordinator must have at least `99` peers configured.
 
 ## API surface
 

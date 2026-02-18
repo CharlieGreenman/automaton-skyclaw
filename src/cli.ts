@@ -15,6 +15,7 @@ function printHelp(): void {
   process.stdout.write(`  SKYCLAW_COORDINATOR_URLS=http://127.0.0.1:8787,http://127.0.0.1:8788\n`);
   process.stdout.write(`  SKYCLAW_PEER_URLS=http://127.0.0.1:8788,http://127.0.0.1:8789\n`);
   process.stdout.write(`  SKYCLAW_COORDINATOR_NODE_ID=node-a\n`);
+  process.stdout.write(`  SKYCLAW_MIN_REPLICATIONS=100\n`);
   process.stdout.write(`  SKYCLAW_TOKEN=<shared-token>\n`);
   process.stdout.write(`  SKYCLAW_ALLOWED_COMMANDS=automaton,node,bash,sh\n`);
   process.stdout.write(`  SKYCLAW_DB_PATH=.skyclaw/coordinator.db\n`);
@@ -82,7 +83,8 @@ async function main(): Promise<void> {
       dbPath: process.env.SKYCLAW_DB_PATH || ".skyclaw/coordinator.db",
       nodeId: process.env.SKYCLAW_COORDINATOR_NODE_ID,
       peerUrls,
-      peerSyncIntervalMs: parseIntEnv("SKYCLAW_PEER_SYNC_MS", 3_000)
+      peerSyncIntervalMs: parseIntEnv("SKYCLAW_PEER_SYNC_MS", 3_000),
+      minReplicas: parseIntEnv("SKYCLAW_MIN_REPLICATIONS", 100)
     });
     return;
   }

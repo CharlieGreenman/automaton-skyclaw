@@ -7,6 +7,11 @@ import type {
   RegisterHostRequest
 } from "../types.js";
 import { readJson, sendError, sendJson } from "../http.js";
+import {
+  assertPeerCapacity,
+  normalizeMinReplicas,
+  requiredPeerReplications
+} from "./replication-policy.js";
 import { CoordinatorState } from "./state.js";
 
 export interface CoordinatorServerOptions {
@@ -18,6 +23,7 @@ export interface CoordinatorServerOptions {
   nodeId?: string;
   peerUrls?: string[];
   peerSyncIntervalMs?: number;
+  minReplicas?: number;
 }
 
 function checkAuth(reqToken: string | undefined, configured: string | undefined): boolean {
@@ -36,12 +42,15 @@ function normalizePeerUrls(urls: string[] | undefined, ownPort: number): string[
 }
 
 export async function startCoordinatorServer(options: CoordinatorServerOptions): Promise<void> {
+  const minReplicas = normalizeMinReplicas(options.minReplicas);
+  const requiredPeerAcks = requiredPeerReplications(minReplicas);
   const state = new CoordinatorState({
     leaseMs: options.leaseMs,
     dbPath: options.dbPath,
     nodeId: options.nodeId
   });
   const peerUrls = normalizePeerUrls(options.peerUrls, options.port);
+  assertPeerCapacity(minReplicas, peerUrls.length);
 
   setInterval(() => {
     state.requeueExpiredLeases();
@@ -95,7 +104,15 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
           return;
         }
         const host = state.registerHost(body);
-        void replicateSnapshotToPeers(state, peerUrls, options.authToken);
+        const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
+        if (replication.acked < requiredPeerAcks) {
+          sendError(
+            res,
+            503,
+            `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
+          );
+          return;
+        }
         sendJson(res, 200, { host });
         return;
       }
@@ -105,7 +122,15 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
         const hostId = decodeURIComponent(heartbeatMatch[1]);
         const body = await readJson<HeartbeatRequest>(req);
         const host = state.heartbeat(hostId, body.activeLeases);
-        void replicateSnapshotToPeers(state, peerUrls, options.authToken);
+        const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
+        if (replication.acked < requiredPeerAcks) {
+          sendError(
+            res,
+            503,
+            `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
+          );
+          return;
+        }
         sendJson(res, 200, { host });
         return;
       }
@@ -117,7 +142,15 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
           return;
         }
         const job = state.enqueueJob(body);
-        void replicateSnapshotToPeers(state, peerUrls, options.authToken);
+        const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
+        if (replication.acked < requiredPeerAcks) {
+          sendError(
+            res,
+            503,
+            `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
+          );
+          return;
+        }
         sendJson(res, 200, { job });
         return;
       }
@@ -127,7 +160,15 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
         const hostId = decodeURIComponent(claimMatch[1]);
         const result = state.claimJob(hostId);
         if (result.job) {
-          void replicateSnapshotToPeers(state, peerUrls, options.authToken);
+          const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
+          if (replication.acked < requiredPeerAcks) {
+            sendError(
+              res,
+              503,
+              `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
+            );
+            return;
+          }
         }
         sendJson(res, 200, result);
         return;
@@ -138,7 +179,15 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
         const jobId = decodeURIComponent(completeMatch[1]);
         const body = await readJson<CompleteJobRequest>(req);
         const job = state.completeJob(jobId, body);
-        void replicateSnapshotToPeers(state, peerUrls, options.authToken);
+        const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
+        if (replication.acked < requiredPeerAcks) {
+          sendError(
+            res,
+            503,
+            `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
+          );
+          return;
+        }
         sendJson(res, 200, { job });
         return;
       }
@@ -157,6 +206,9 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
   process.stdout.write(
     `[skyclaw] coordinator ${state.getNodeId()} listening on http://${options.host ?? "0.0.0.0"}:${options.port}\n`
   );
+  process.stdout.write(
+    `[skyclaw] replication policy: min replicas ${minReplicas} (${requiredPeerAcks} peer acks required)\n`
+  );
 
   if (peerUrls.length > 0) {
     process.stdout.write(`[skyclaw] peers: ${peerUrls.join(", ")}\n`);
@@ -168,14 +220,13 @@ async function replicateSnapshotToPeers(
   state: CoordinatorState,
   peerUrls: string[],
   token?: string
-): Promise<void> {
-  if (peerUrls.length === 0) return;
+): Promise<{ acked: number; attempted: number }> {
+  if (peerUrls.length === 0) return { acked: 0, attempted: 0 };
   const snapshot = state.snapshot();
-
-  await Promise.all(
+  const results = await Promise.all(
     peerUrls.map(async (peerUrl) => {
       try {
-        await fetch(`${peerUrl}/v1/replicate/snapshot`, {
+        const response = await fetch(`${peerUrl}/v1/replicate/snapshot`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -183,11 +234,14 @@ async function replicateSnapshotToPeers(
           },
           body: JSON.stringify(snapshot)
         });
+        return response.ok;
       } catch {
         // best-effort replication
+        return false;
       }
     })
   );
+  return { acked: results.filter(Boolean).length, attempted: peerUrls.length };
 }
 
 async function syncFromPeers(state: CoordinatorState, peerUrls: string[], token?: string): Promise<void> {
