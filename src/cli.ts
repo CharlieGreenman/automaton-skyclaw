@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { startCoordinatorServer } from "./coordinator/server.js";
-import { hostConfigFromEnv, startHostDaemon } from "./host/daemon.js";
+import { hostConfigFromEnv, parseCoordinatorUrlsFromEnv, startHostDaemon } from "./host/daemon.js";
 import { parseIntEnv } from "./util.js";
 
 function printHelp(): void {
@@ -12,25 +12,52 @@ function printHelp(): void {
   process.stdout.write(`  skyclaw enqueue-automaton [automaton args...]\n`);
   process.stdout.write(`\nEnvironment:\n`);
   process.stdout.write(`  SKYCLAW_COORDINATOR_URL=http://127.0.0.1:8787\n`);
+  process.stdout.write(`  SKYCLAW_COORDINATOR_URLS=http://127.0.0.1:8787,http://127.0.0.1:8788\n`);
+  process.stdout.write(`  SKYCLAW_PEER_URLS=http://127.0.0.1:8788,http://127.0.0.1:8789\n`);
+  process.stdout.write(`  SKYCLAW_COORDINATOR_NODE_ID=node-a\n`);
   process.stdout.write(`  SKYCLAW_TOKEN=<shared-token>\n`);
   process.stdout.write(`  SKYCLAW_ALLOWED_COMMANDS=automaton,node,bash,sh\n`);
   process.stdout.write(`  SKYCLAW_DB_PATH=.skyclaw/coordinator.db\n`);
 }
 
-async function postJson(url: string, body: unknown, token?: string): Promise<any> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(token ? { "x-skyclaw-token": token } : {})
-    },
-    body: JSON.stringify(body)
-  });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`request failed (${response.status}): ${text}`);
+class CoordinatorClient {
+  private activeIndex = 0;
+
+  constructor(
+    private readonly urls: string[],
+    private readonly token?: string
+  ) {}
+
+  async postJson(path: string, body: unknown): Promise<any> {
+    let lastError: unknown;
+
+    for (let i = 0; i < this.urls.length; i += 1) {
+      const index = (this.activeIndex + i) % this.urls.length;
+      const baseUrl = this.urls[index];
+      try {
+        const response = await fetch(`${baseUrl}${path}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(this.token ? { "x-skyclaw-token": this.token } : {})
+          },
+          body: JSON.stringify(body)
+        });
+
+        const text = await response.text();
+        if (!response.ok) {
+          throw new Error(`request failed (${response.status}): ${text}`);
+        }
+
+        this.activeIndex = index;
+        return text ? JSON.parse(text) : {};
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("all coordinators unavailable");
   }
-  return text ? JSON.parse(text) : {};
 }
 
 async function main(): Promise<void> {
@@ -42,12 +69,20 @@ async function main(): Promise<void> {
   }
 
   if (command === "coordinator") {
+    const peerUrls = (process.env.SKYCLAW_PEER_URLS || "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+
     await startCoordinatorServer({
       port: parseIntEnv("SKYCLAW_COORDINATOR_PORT", 8787),
       host: process.env.SKYCLAW_COORDINATOR_HOST || "0.0.0.0",
       authToken: process.env.SKYCLAW_TOKEN,
       leaseMs: parseIntEnv("SKYCLAW_LEASE_MS", 60_000),
-      dbPath: process.env.SKYCLAW_DB_PATH || ".skyclaw/coordinator.db"
+      dbPath: process.env.SKYCLAW_DB_PATH || ".skyclaw/coordinator.db",
+      nodeId: process.env.SKYCLAW_COORDINATOR_NODE_ID,
+      peerUrls,
+      peerSyncIntervalMs: parseIntEnv("SKYCLAW_PEER_SYNC_MS", 3_000)
     });
     return;
   }
@@ -57,46 +92,39 @@ async function main(): Promise<void> {
     return;
   }
 
-  const coordinatorUrl = process.env.SKYCLAW_COORDINATOR_URL || "http://127.0.0.1:8787";
+  const coordinatorUrls = parseCoordinatorUrlsFromEnv();
   const token = process.env.SKYCLAW_TOKEN;
+  const client = new CoordinatorClient(coordinatorUrls, token);
 
   if (command === "enqueue-shell") {
     const [shellCommand, ...shellArgs] = args;
     if (!shellCommand) {
       throw new Error("enqueue-shell requires a command");
     }
-    const response = await postJson(
-      `${coordinatorUrl}/v1/jobs`,
-      {
-        payload: {
-          kind: "shell",
-          command: shellCommand,
-          args: shellArgs
-        },
-        requirement: {
-          requiredCapabilities: ["shell"]
-        }
+    const response = await client.postJson("/v1/jobs", {
+      payload: {
+        kind: "shell",
+        command: shellCommand,
+        args: shellArgs
       },
-      token
-    );
+      requirement: {
+        requiredCapabilities: ["shell"]
+      }
+    });
     process.stdout.write(`${response.job.id}\n`);
     return;
   }
 
   if (command === "enqueue-automaton") {
-    const response = await postJson(
-      `${coordinatorUrl}/v1/jobs`,
-      {
-        payload: {
-          kind: "automaton-run",
-          args
-        },
-        requirement: {
-          requiredCapabilities: ["automaton"]
-        }
+    const response = await client.postJson("/v1/jobs", {
+      payload: {
+        kind: "automaton-run",
+        args
       },
-      token
-    );
+      requirement: {
+        requiredCapabilities: ["automaton"]
+      }
+    });
     process.stdout.write(`${response.job.id}\n`);
     return;
   }

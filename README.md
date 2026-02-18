@@ -26,6 +26,8 @@ npm run build
 
 ```bash
 export SKYCLAW_TOKEN=change-me
+export SKYCLAW_COORDINATOR_NODE_ID=node-a
+export SKYCLAW_PEER_URLS=http://127.0.0.1:8788,http://127.0.0.1:8789
 node dist/cli.js coordinator
 ```
 
@@ -33,6 +35,7 @@ node dist/cli.js coordinator
 
 ```bash
 export SKYCLAW_COORDINATOR_URL=http://127.0.0.1:8787
+export SKYCLAW_COORDINATOR_URLS=http://127.0.0.1:8787,http://127.0.0.1:8788,http://127.0.0.1:8789
 export SKYCLAW_TOKEN=change-me
 export SKYCLAW_CAPABILITIES=shell,automaton
 export SKYCLAW_ALLOWED_COMMANDS=automaton,node,bash,sh
@@ -69,8 +72,18 @@ Jobs can request capabilities (`shell`, `automaton`, etc). Hosts only claim jobs
 - Coordinator state is persisted in SQLite (`SKYCLAW_DB_PATH`, default `.skyclaw/coordinator.db`).
 - If the coordinator process crashes and restarts on the same machine/disk, hosts/jobs are reloaded.
 - Expired leases are re-queued automatically after restart.
-- If the entire coordinator server is lost (disk gone), state is lost in this MVP.
-- For true server-loss resilience, run replicated storage + standby coordinators (next phase).
+- Multi-node replication is supported via peer coordinators (`SKYCLAW_PEER_URLS`) and periodic sync.
+- Hosts/clients can fail over across coordinators via `SKYCLAW_COORDINATOR_URLS`.
+- If one coordinator node goes down, another node can continue scheduling from replicated state.
+- If all coordinator disks are lost, state is lost.
+
+## Multi-node setup
+
+- Run 2+ coordinators with unique `SKYCLAW_COORDINATOR_NODE_ID`.
+- Give each coordinator its own SQLite file (`SKYCLAW_DB_PATH`).
+- Configure each coordinator with the others in `SKYCLAW_PEER_URLS`.
+- Point hosts and enqueuers at all coordinators using `SKYCLAW_COORDINATOR_URLS`.
+- Keep one shared `SKYCLAW_TOKEN` across the coordinator cluster.
 
 ## API surface
 
@@ -79,12 +92,13 @@ Jobs can request capabilities (`shell`, `automaton`, etc). Hosts only claim jobs
 - `POST /v1/hosts/:id/claim`
 - `POST /v1/jobs`
 - `POST /v1/jobs/:id/complete`
+- `POST /v1/replicate/snapshot`
 - `GET /v1/state`
 - `GET /health`
 
 ## Next integration steps
 
 - Add signed host identities instead of shared token.
-- Persist queue state (SQLite/Postgres) and add multi-coordinator replication.
+- Replace full-snapshot replication with incremental log shipping.
 - Integrate OpenClaw gateway auth/profile metadata into host registration.
 - Add payment settlement and proof-of-execution receipts.

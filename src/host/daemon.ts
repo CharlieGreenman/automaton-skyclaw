@@ -3,7 +3,7 @@ import { parseIntEnv } from "../util.js";
 import { runJob, type HostExecutionConfig } from "./runner.js";
 
 export interface HostDaemonConfig {
-  coordinatorUrl: string;
+  coordinatorUrls: string[];
   token?: string;
   hostName: string;
   hostId?: string;
@@ -14,45 +14,66 @@ export interface HostDaemonConfig {
   execution: HostExecutionConfig;
 }
 
-async function postJson<T>(url: string, body: unknown, token?: string): Promise<T> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(token ? { "x-skyclaw-token": token } : {})
-    },
-    body: JSON.stringify(body)
-  });
+class CoordinatorClient {
+  private activeIndex = 0;
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`request failed (${response.status}): ${text}`);
+  constructor(
+    private readonly urls: string[],
+    private readonly token?: string
+  ) {}
+
+  async postJson<T>(path: string, body: unknown): Promise<T> {
+    let lastError: unknown;
+
+    for (let i = 0; i < this.urls.length; i += 1) {
+      const index = (this.activeIndex + i) % this.urls.length;
+      const baseUrl = this.urls[index];
+      try {
+        const response = await fetch(`${baseUrl}${path}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(this.token ? { "x-skyclaw-token": this.token } : {})
+          },
+          body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+          throw new Error(`request failed (${response.status}): ${await response.text()}`);
+        }
+
+        this.activeIndex = index;
+        return (await response.json()) as T;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("all coordinators unavailable");
   }
-
-  return (await response.json()) as T;
 }
 
 export async function startHostDaemon(config: HostDaemonConfig): Promise<void> {
-  const registerRes = await postJson<RegisterHostResponse>(
-    `${config.coordinatorUrl}/v1/hosts/register`,
-    {
-      hostId: config.hostId,
-      name: config.hostName,
-      capabilities: config.capabilities,
-      maxParallel: config.maxParallel
-    },
-    config.token
-  );
+  if (config.coordinatorUrls.length === 0) {
+    throw new Error("at least one coordinator URL is required");
+  }
+  const client = new CoordinatorClient(config.coordinatorUrls, config.token);
+
+  const registerRes = await client.postJson<RegisterHostResponse>("/v1/hosts/register", {
+    hostId: config.hostId,
+    name: config.hostName,
+    capabilities: config.capabilities,
+    maxParallel: config.maxParallel
+  });
 
   let host: HostRecord = registerRes.host;
   process.stdout.write(`[skyclaw] host registered: ${host.id} (${host.name})\n`);
 
   setInterval(async () => {
     try {
-      const next = await postJson<{ host: HostRecord }>(
-        `${config.coordinatorUrl}/v1/hosts/${encodeURIComponent(host.id)}/heartbeat`,
-        { activeLeases: host.activeLeases },
-        config.token
+      const next = await client.postJson<{ host: HostRecord }>(
+        `/v1/hosts/${encodeURIComponent(host.id)}/heartbeat`,
+        { activeLeases: host.activeLeases }
       );
       host = next.host;
     } catch (error) {
@@ -63,10 +84,9 @@ export async function startHostDaemon(config: HostDaemonConfig): Promise<void> {
 
   for (;;) {
     try {
-      const claim = await postJson<{ job: JobRecord | null }>(
-        `${config.coordinatorUrl}/v1/hosts/${encodeURIComponent(host.id)}/claim`,
-        {},
-        config.token
+      const claim = await client.postJson<{ job: JobRecord | null }>(
+        `/v1/hosts/${encodeURIComponent(host.id)}/claim`,
+        {}
       );
 
       if (!claim.job) {
@@ -78,19 +98,15 @@ export async function startHostDaemon(config: HostDaemonConfig): Promise<void> {
       process.stdout.write(`[skyclaw] running ${claim.job.id} (${claim.job.payload.kind})\n`);
       const result = await runJob(claim.job.payload, config.execution);
 
-      await postJson(
-        `${config.coordinatorUrl}/v1/jobs/${encodeURIComponent(claim.job.id)}/complete`,
-        {
-          hostId: host.id,
-          success: result.success,
-          durationMs: result.durationMs,
-          exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          error: result.error
-        },
-        config.token
-      );
+      await client.postJson(`/v1/jobs/${encodeURIComponent(claim.job.id)}/complete`, {
+        hostId: host.id,
+        success: result.success,
+        durationMs: result.durationMs,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: result.error
+      });
 
       if (host.activeLeases > 0) {
         host.activeLeases -= 1;
@@ -106,7 +122,7 @@ export async function startHostDaemon(config: HostDaemonConfig): Promise<void> {
 }
 
 export function hostConfigFromEnv(): HostDaemonConfig {
-  const coordinatorUrl = process.env.SKYCLAW_COORDINATOR_URL || "http://127.0.0.1:8787";
+  const coordinatorUrls = parseCoordinatorUrlsFromEnv();
   const token = process.env.SKYCLAW_TOKEN;
   const hostName = process.env.SKYCLAW_HOST_NAME || `openclaw-${process.pid}`;
   const hostId = process.env.SKYCLAW_HOST_ID;
@@ -121,7 +137,7 @@ export function hostConfigFromEnv(): HostDaemonConfig {
     .filter(Boolean);
 
   return {
-    coordinatorUrl,
+    coordinatorUrls,
     token,
     hostName,
     hostId,
@@ -136,6 +152,17 @@ export function hostConfigFromEnv(): HostDaemonConfig {
       automatonCommand: process.env.SKYCLAW_AUTOMATON_COMMAND || "automaton"
     }
   };
+}
+
+export function parseCoordinatorUrlsFromEnv(): string[] {
+  const list = process.env.SKYCLAW_COORDINATOR_URLS;
+  if (list?.trim()) {
+    return list
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+  return [process.env.SKYCLAW_COORDINATOR_URL || "http://127.0.0.1:8787"];
 }
 
 function sleep(ms: number): Promise<void> {

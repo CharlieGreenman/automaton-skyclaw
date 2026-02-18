@@ -7,12 +7,13 @@ import type {
   JobRecord,
   RegisterHostRequest
 } from "../types.js";
-import { CoordinatorStorage } from "./storage.js";
 import { hasCapabilities, makeId, normalizeCapabilities, nowIso } from "../util.js";
+import { CoordinatorStorage } from "./storage.js";
 
 export interface CoordinatorStateOptions {
   leaseMs?: number;
   dbPath?: string;
+  nodeId?: string;
 }
 
 export class CoordinatorState {
@@ -20,9 +21,12 @@ export class CoordinatorState {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly leaseMs: number;
   private readonly storage?: CoordinatorStorage;
+  private readonly nodeId: string;
+  private nextVersion = 1;
 
   constructor(options: CoordinatorStateOptions = {}) {
     this.leaseMs = options.leaseMs ?? 60_000;
+    this.nodeId = options.nodeId?.trim() || makeId("node");
     if (options.dbPath) {
       this.storage = new CoordinatorStorage(options.dbPath);
       for (const host of this.storage.loadHosts()) {
@@ -31,7 +35,14 @@ export class CoordinatorState {
       for (const job of this.storage.loadJobs()) {
         this.jobs.set(job.id, job);
       }
+      const maxHostVersion = Math.max(0, ...[...this.hosts.values()].map((host) => host.version || 0));
+      const maxJobVersion = Math.max(0, ...[...this.jobs.values()].map((job) => job.version || 0));
+      this.nextVersion = Math.max(maxHostVersion, maxJobVersion) + 1;
     }
+  }
+
+  getNodeId(): string {
+    return this.nodeId;
   }
 
   registerHost(input: RegisterHostRequest): HostRecord {
@@ -45,11 +56,13 @@ export class CoordinatorState {
       maxParallel: Math.max(1, input.maxParallel ?? 1),
       activeLeases: existing?.activeLeases ?? 0,
       lastSeenAt: now,
-      registeredAt: existing?.registeredAt ?? now
+      registeredAt: existing?.registeredAt ?? now,
+      updatedBy: this.nodeId,
+      version: this.bumpVersion()
     };
     this.hosts.set(id, host);
     this.storage?.saveHost(host);
-    return host;
+    return structuredClone(host);
   }
 
   heartbeat(hostId: string, activeLeases?: number): HostRecord {
@@ -61,8 +74,8 @@ export class CoordinatorState {
     if (typeof activeLeases === "number" && Number.isFinite(activeLeases) && activeLeases >= 0) {
       host.activeLeases = activeLeases;
     }
-    this.storage?.saveHost(host);
-    return host;
+    this.touchHost(host);
+    return structuredClone(host);
   }
 
   enqueueJob(input: EnqueueJobRequest): JobRecord {
@@ -71,6 +84,8 @@ export class CoordinatorState {
       id: makeId("job"),
       createdAt: now,
       updatedAt: now,
+      updatedBy: this.nodeId,
+      version: this.bumpVersion(),
       status: "queued",
       attempts: 0,
       requirement: {
@@ -80,7 +95,7 @@ export class CoordinatorState {
     };
     this.jobs.set(record.id, record);
     this.storage?.saveJob(record);
-    return record;
+    return structuredClone(record);
   }
 
   claimJob(hostId: string): ClaimJobResponse {
@@ -105,15 +120,14 @@ export class CoordinatorState {
       return { job: null };
     }
 
-    const now = nowIso();
     next.status = "leased";
     next.attempts += 1;
     next.assignedHostId = hostId;
-    next.updatedAt = now;
     next.leaseExpiresAt = new Date(Date.now() + this.leaseMs).toISOString();
+    this.touchJob(next);
+
     host.activeLeases += 1;
-    this.storage?.saveHost(host);
-    this.storage?.saveJob(next);
+    this.touchHost(host);
 
     return { job: structuredClone(next) };
   }
@@ -135,9 +149,8 @@ export class CoordinatorState {
     }
 
     job.status = input.success ? "completed" : "failed";
-    job.updatedAt = nowIso();
     job.result = {
-      finishedAt: job.updatedAt,
+      finishedAt: nowIso(),
       durationMs: input.durationMs,
       exitCode: input.exitCode,
       stdout: input.stdout,
@@ -145,12 +158,12 @@ export class CoordinatorState {
     };
     job.error = input.error;
     job.leaseExpiresAt = undefined;
+    this.touchJob(job);
 
     if (host.activeLeases > 0) {
       host.activeLeases -= 1;
     }
-    this.storage?.saveHost(host);
-    this.storage?.saveJob(job);
+    this.touchHost(host);
 
     return structuredClone(job);
   }
@@ -168,25 +181,93 @@ export class CoordinatorState {
       const host = job.assignedHostId ? this.hosts.get(job.assignedHostId) : undefined;
       if (host && host.activeLeases > 0) {
         host.activeLeases -= 1;
-        this.storage?.saveHost(host);
+        this.touchHost(host);
       }
       job.status = "queued";
       job.assignedHostId = undefined;
       job.leaseExpiresAt = undefined;
-      job.updatedAt = nowIso();
-      this.storage?.saveJob(job);
+      this.touchJob(job);
       requeued += 1;
     }
     return requeued;
   }
 
+  mergeSnapshot(snapshot: CoordinatorSnapshot): { changed: boolean } {
+    let changed = false;
+
+    for (const incomingHost of snapshot.hosts || []) {
+      const current = this.hosts.get(incomingHost.id);
+      if (!current || shouldAdopt(current, incomingHost)) {
+        const adopted = structuredClone(incomingHost);
+        this.hosts.set(adopted.id, adopted);
+        this.storage?.saveHost(adopted);
+        this.nextVersion = Math.max(this.nextVersion, (adopted.version || 0) + 1);
+        changed = true;
+      }
+    }
+
+    for (const incomingJob of snapshot.jobs || []) {
+      const current = this.jobs.get(incomingJob.id);
+      if (!current || shouldAdopt(current, incomingJob)) {
+        const adopted = structuredClone(incomingJob);
+        this.jobs.set(adopted.id, adopted);
+        this.storage?.saveJob(adopted);
+        this.nextVersion = Math.max(this.nextVersion, (adopted.version || 0) + 1);
+        changed = true;
+      }
+    }
+
+    return { changed };
+  }
+
   snapshot(): CoordinatorSnapshot {
     this.requeueExpiredLeases();
     return {
+      nodeId: this.nodeId,
       hosts: [...this.hosts.values()].map((host) => structuredClone(host)),
       jobs: [...this.jobs.values()]
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
         .map((job) => structuredClone(job))
     };
   }
+
+  private bumpVersion(): number {
+    const version = this.nextVersion;
+    this.nextVersion += 1;
+    return version;
+  }
+
+  private touchHost(host: HostRecord): void {
+    host.version = this.bumpVersion();
+    host.updatedBy = this.nodeId;
+    this.storage?.saveHost(host);
+  }
+
+  private touchJob(job: JobRecord): void {
+    job.updatedAt = nowIso();
+    job.version = this.bumpVersion();
+    job.updatedBy = this.nodeId;
+    this.storage?.saveJob(job);
+  }
+}
+
+function shouldAdopt<T extends { version?: number; updatedBy?: string; updatedAt?: string }>(
+  local: T,
+  incoming: T
+): boolean {
+  const localVersion = local.version || 0;
+  const incomingVersion = incoming.version || 0;
+  if (incomingVersion !== localVersion) {
+    return incomingVersion > localVersion;
+  }
+
+  const localUpdatedAt = local.updatedAt || "";
+  const incomingUpdatedAt = incoming.updatedAt || "";
+  if (incomingUpdatedAt !== localUpdatedAt) {
+    return incomingUpdatedAt > localUpdatedAt;
+  }
+
+  const localUpdatedBy = local.updatedBy || "";
+  const incomingUpdatedBy = incoming.updatedBy || "";
+  return incomingUpdatedBy > localUpdatedBy;
 }

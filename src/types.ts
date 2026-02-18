@@ -27,6 +27,8 @@ export interface JobRecord {
   id: string;
   createdAt: string;
   updatedAt: string;
+  updatedBy: string;
+  version: number;
   status: JobStatus;
   attempts: number;
   leaseExpiresAt?: string;
@@ -51,6 +53,8 @@ export interface HostRecord {
   activeLeases: number;
   lastSeenAt: string;
   registeredAt: string;
+  updatedBy: string;
+  version: number;
 }
 
 export interface RegisterHostRequest {
@@ -88,6 +92,7 @@ export interface CompleteJobRequest {
 }
 
 export interface CoordinatorSnapshot {
+  nodeId?: string;
   hosts: HostRecord[];
   jobs: JobRecord[];
 }

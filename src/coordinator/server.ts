@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import type {
   CompleteJobRequest,
+  CoordinatorSnapshot,
   EnqueueJobRequest,
   HeartbeatRequest,
   RegisterHostRequest
@@ -14,6 +15,9 @@ export interface CoordinatorServerOptions {
   authToken?: string;
   leaseMs?: number;
   dbPath?: string;
+  nodeId?: string;
+  peerUrls?: string[];
+  peerSyncIntervalMs?: number;
 }
 
 function checkAuth(reqToken: string | undefined, configured: string | undefined): boolean {
@@ -21,12 +25,34 @@ function checkAuth(reqToken: string | undefined, configured: string | undefined)
   return reqToken === configured;
 }
 
+function normalizePeerUrls(urls: string[] | undefined, ownPort: number): string[] {
+  if (!urls?.length) return [];
+  const ownLocal = new Set([
+    `http://127.0.0.1:${ownPort}`,
+    `http://localhost:${ownPort}`,
+    `http://0.0.0.0:${ownPort}`
+  ]);
+  return [...new Set(urls.map((url) => url.trim()).filter(Boolean))].filter((url) => !ownLocal.has(url));
+}
+
 export async function startCoordinatorServer(options: CoordinatorServerOptions): Promise<void> {
-  const state = new CoordinatorState({ leaseMs: options.leaseMs, dbPath: options.dbPath });
+  const state = new CoordinatorState({
+    leaseMs: options.leaseMs,
+    dbPath: options.dbPath,
+    nodeId: options.nodeId
+  });
+  const peerUrls = normalizePeerUrls(options.peerUrls, options.port);
 
   setInterval(() => {
     state.requeueExpiredLeases();
   }, 1_000).unref();
+
+  if (peerUrls.length > 0) {
+    const syncIntervalMs = options.peerSyncIntervalMs ?? 3_000;
+    setInterval(() => {
+      void syncFromPeers(state, peerUrls, options.authToken);
+    }, syncIntervalMs).unref();
+  }
 
   const server = createServer(async (req, res) => {
     try {
@@ -46,12 +72,19 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
       const { pathname } = url;
 
       if (req.method === "GET" && pathname === "/health") {
-        sendJson(res, 200, { ok: true });
+        sendJson(res, 200, { ok: true, nodeId: state.getNodeId() });
         return;
       }
 
       if (req.method === "GET" && pathname === "/v1/state") {
         sendJson(res, 200, state.snapshot());
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/v1/replicate/snapshot") {
+        const snapshot = await readJson<CoordinatorSnapshot>(req);
+        const merged = state.mergeSnapshot(snapshot);
+        sendJson(res, 200, { ok: true, changed: merged.changed, nodeId: state.getNodeId() });
         return;
       }
 
@@ -62,6 +95,7 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
           return;
         }
         const host = state.registerHost(body);
+        void replicateSnapshotToPeers(state, peerUrls, options.authToken);
         sendJson(res, 200, { host });
         return;
       }
@@ -71,6 +105,7 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
         const hostId = decodeURIComponent(heartbeatMatch[1]);
         const body = await readJson<HeartbeatRequest>(req);
         const host = state.heartbeat(hostId, body.activeLeases);
+        void replicateSnapshotToPeers(state, peerUrls, options.authToken);
         sendJson(res, 200, { host });
         return;
       }
@@ -82,6 +117,7 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
           return;
         }
         const job = state.enqueueJob(body);
+        void replicateSnapshotToPeers(state, peerUrls, options.authToken);
         sendJson(res, 200, { job });
         return;
       }
@@ -90,6 +126,9 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
       if (req.method === "POST" && claimMatch) {
         const hostId = decodeURIComponent(claimMatch[1]);
         const result = state.claimJob(hostId);
+        if (result.job) {
+          void replicateSnapshotToPeers(state, peerUrls, options.authToken);
+        }
         sendJson(res, 200, result);
         return;
       }
@@ -99,6 +138,7 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
         const jobId = decodeURIComponent(completeMatch[1]);
         const body = await readJson<CompleteJobRequest>(req);
         const job = state.completeJob(jobId, body);
+        void replicateSnapshotToPeers(state, peerUrls, options.authToken);
         sendJson(res, 200, { job });
         return;
       }
@@ -115,6 +155,56 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
   });
 
   process.stdout.write(
-    `[skyclaw] coordinator listening on http://${options.host ?? "0.0.0.0"}:${options.port}\n`
+    `[skyclaw] coordinator ${state.getNodeId()} listening on http://${options.host ?? "0.0.0.0"}:${options.port}\n`
+  );
+
+  if (peerUrls.length > 0) {
+    process.stdout.write(`[skyclaw] peers: ${peerUrls.join(", ")}\n`);
+    void syncFromPeers(state, peerUrls, options.authToken);
+  }
+}
+
+async function replicateSnapshotToPeers(
+  state: CoordinatorState,
+  peerUrls: string[],
+  token?: string
+): Promise<void> {
+  if (peerUrls.length === 0) return;
+  const snapshot = state.snapshot();
+
+  await Promise.all(
+    peerUrls.map(async (peerUrl) => {
+      try {
+        await fetch(`${peerUrl}/v1/replicate/snapshot`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(token ? { "x-skyclaw-token": token } : {})
+          },
+          body: JSON.stringify(snapshot)
+        });
+      } catch {
+        // best-effort replication
+      }
+    })
+  );
+}
+
+async function syncFromPeers(state: CoordinatorState, peerUrls: string[], token?: string): Promise<void> {
+  await Promise.all(
+    peerUrls.map(async (peerUrl) => {
+      try {
+        const response = await fetch(`${peerUrl}/v1/state`, {
+          headers: {
+            ...(token ? { "x-skyclaw-token": token } : {})
+          }
+        });
+        if (!response.ok) return;
+        const snapshot = (await response.json()) as CoordinatorSnapshot;
+        state.mergeSnapshot(snapshot);
+      } catch {
+        // best-effort peer sync
+      }
+    })
   );
 }

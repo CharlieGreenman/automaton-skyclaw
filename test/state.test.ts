@@ -94,4 +94,23 @@ describe("CoordinatorState", () => {
     expect(claimAgain.job?.id).toBe(job.id);
     expect(claimAgain.job?.attempts).toBe(2);
   });
+
+  it("merges newer peer snapshots", () => {
+    const nodeA = new CoordinatorState({ nodeId: "node-a" });
+    const host = nodeA.registerHost({ name: "openclaw-peer", capabilities: ["shell"] });
+    const job = nodeA.enqueueJob({
+      payload: { kind: "shell", command: "bash", args: ["-lc", "echo multi"] }
+    });
+
+    const nodeB = new CoordinatorState({ nodeId: "node-b" });
+    const merged = nodeB.mergeSnapshot(nodeA.snapshot());
+    expect(merged.changed).toBe(true);
+
+    const snapB = nodeB.snapshot();
+    expect(snapB.hosts.some((h) => h.id === host.id)).toBe(true);
+    expect(snapB.jobs.some((j) => j.id === job.id)).toBe(true);
+
+    const secondMerge = nodeB.mergeSnapshot(nodeA.snapshot());
+    expect(secondMerge.changed).toBe(false);
+  });
 });

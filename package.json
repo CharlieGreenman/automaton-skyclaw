@@ -1,7 +1,6 @@
 {
   "name": "skyclaw",
   "version": "0.1.0",
-  "private": true,
   "description": "OpenClaw-hosted compute bridge for Automaton workloads",
   "type": "module",
   "bin": {
