@@ -164,6 +164,8 @@ Jobs can request capabilities (`shell`, `automaton`, etc). Hosts only claim jobs
 - Mutating endpoints support `X-Idempotency-Key`.
 - Implemented on:
   - `POST /v1/hosts/register`
+  - `POST /v1/hosts/:id/heartbeat`
+  - `POST /v1/hosts/:id/claim`
   - `POST /v1/jobs`
   - `POST /v1/jobs/:id/complete`
 - Repeating the same request with the same key returns the cached response.

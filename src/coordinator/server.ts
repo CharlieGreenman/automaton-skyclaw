@@ -142,18 +142,32 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
       if (req.method === "POST" && heartbeatMatch) {
         const hostId = decodeURIComponent(heartbeatMatch[1]);
         const body = await readJson<HeartbeatRequest>(req);
-        const applied = await applyMutationWithQuorum(
+        const route = `/v1/hosts/${hostId}/heartbeat`;
+        const applied = await applyIdempotentMutation(
+          req,
           state,
-          peerUrls,
-          options.authToken,
-          requiredPeerAcks,
-          () => state.heartbeat(hostId, body.activeLeases)
+          route,
+          body,
+          idempotencyTtlMs,
+          () =>
+            applyMutationWithQuorum(
+              state,
+              peerUrls,
+              options.authToken,
+              requiredPeerAcks,
+              () => state.heartbeat(hostId, body.activeLeases)
+            ),
+          (host) => ({ host })
         );
-        if (!applied.ok) {
+        if (applied.kind === "conflict") {
+          sendError(res, 409, applied.error);
+          return;
+        }
+        if (applied.kind === "error") {
           sendError(res, 503, applied.error);
           return;
         }
-        sendJson(res, 200, { host: applied.value });
+        sendJson(res, applied.statusCode, applied.body);
         return;
       }
 
@@ -194,18 +208,33 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
       const claimMatch = pathname.match(/^\/v1\/hosts\/([^/]+)\/claim$/);
       if (req.method === "POST" && claimMatch) {
         const hostId = decodeURIComponent(claimMatch[1]);
-        const applied = await applyMutationWithQuorum(
+        const claimBody = await readJson<Record<string, unknown>>(req);
+        const route = `/v1/hosts/${hostId}/claim`;
+        const applied = await applyIdempotentMutation(
+          req,
           state,
-          peerUrls,
-          options.authToken,
-          requiredPeerAcks,
-          () => state.claimJob(hostId)
+          route,
+          claimBody,
+          idempotencyTtlMs,
+          () =>
+            applyMutationWithQuorum(
+              state,
+              peerUrls,
+              options.authToken,
+              requiredPeerAcks,
+              () => state.claimJob(hostId)
+            ),
+          (claimResponse) => claimResponse
         );
-        if (!applied.ok) {
+        if (applied.kind === "conflict") {
+          sendError(res, 409, applied.error);
+          return;
+        }
+        if (applied.kind === "error") {
           sendError(res, 503, applied.error);
           return;
         }
-        sendJson(res, 200, applied.value);
+        sendJson(res, applied.statusCode, applied.body);
         return;
       }
 
