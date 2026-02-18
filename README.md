@@ -36,6 +36,7 @@ export SKYCLAW_COORDINATOR_URL=http://127.0.0.1:8787
 export SKYCLAW_TOKEN=change-me
 export SKYCLAW_CAPABILITIES=shell,automaton
 export SKYCLAW_ALLOWED_COMMANDS=automaton,node,bash,sh
+export SKYCLAW_DB_PATH=.skyclaw/coordinator.db
 node dist/cli.js host
 ```
 
@@ -62,6 +63,14 @@ Jobs can request capabilities (`shell`, `automaton`, etc). Hosts only claim jobs
 - Host-local command allowlist (`SKYCLAW_ALLOWED_COMMANDS`).
 - Per-job timeout (`SKYCLAW_TIMEOUT_MS` fallback).
 - Output truncation (`SKYCLAW_MAX_OUTPUT_BYTES`).
+
+## Durability and failures
+
+- Coordinator state is persisted in SQLite (`SKYCLAW_DB_PATH`, default `.skyclaw/coordinator.db`).
+- If the coordinator process crashes and restarts on the same machine/disk, hosts/jobs are reloaded.
+- Expired leases are re-queued automatically after restart.
+- If the entire coordinator server is lost (disk gone), state is lost in this MVP.
+- For true server-loss resilience, run replicated storage + standby coordinators (next phase).
 
 ## API surface
 

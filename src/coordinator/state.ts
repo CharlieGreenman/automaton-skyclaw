@@ -7,19 +7,31 @@ import type {
   JobRecord,
   RegisterHostRequest
 } from "../types.js";
+import { CoordinatorStorage } from "./storage.js";
 import { hasCapabilities, makeId, normalizeCapabilities, nowIso } from "../util.js";
 
 export interface CoordinatorStateOptions {
   leaseMs?: number;
+  dbPath?: string;
 }
 
 export class CoordinatorState {
   private readonly hosts = new Map<string, HostRecord>();
   private readonly jobs = new Map<string, JobRecord>();
   private readonly leaseMs: number;
+  private readonly storage?: CoordinatorStorage;
 
   constructor(options: CoordinatorStateOptions = {}) {
     this.leaseMs = options.leaseMs ?? 60_000;
+    if (options.dbPath) {
+      this.storage = new CoordinatorStorage(options.dbPath);
+      for (const host of this.storage.loadHosts()) {
+        this.hosts.set(host.id, host);
+      }
+      for (const job of this.storage.loadJobs()) {
+        this.jobs.set(job.id, job);
+      }
+    }
   }
 
   registerHost(input: RegisterHostRequest): HostRecord {
@@ -36,6 +48,7 @@ export class CoordinatorState {
       registeredAt: existing?.registeredAt ?? now
     };
     this.hosts.set(id, host);
+    this.storage?.saveHost(host);
     return host;
   }
 
@@ -48,6 +61,7 @@ export class CoordinatorState {
     if (typeof activeLeases === "number" && Number.isFinite(activeLeases) && activeLeases >= 0) {
       host.activeLeases = activeLeases;
     }
+    this.storage?.saveHost(host);
     return host;
   }
 
@@ -65,6 +79,7 @@ export class CoordinatorState {
       payload: input.payload
     };
     this.jobs.set(record.id, record);
+    this.storage?.saveJob(record);
     return record;
   }
 
@@ -97,6 +112,8 @@ export class CoordinatorState {
     next.updatedAt = now;
     next.leaseExpiresAt = new Date(Date.now() + this.leaseMs).toISOString();
     host.activeLeases += 1;
+    this.storage?.saveHost(host);
+    this.storage?.saveJob(next);
 
     return { job: structuredClone(next) };
   }
@@ -132,6 +149,8 @@ export class CoordinatorState {
     if (host.activeLeases > 0) {
       host.activeLeases -= 1;
     }
+    this.storage?.saveHost(host);
+    this.storage?.saveJob(job);
 
     return structuredClone(job);
   }
@@ -149,11 +168,13 @@ export class CoordinatorState {
       const host = job.assignedHostId ? this.hosts.get(job.assignedHostId) : undefined;
       if (host && host.activeLeases > 0) {
         host.activeLeases -= 1;
+        this.storage?.saveHost(host);
       }
       job.status = "queued";
       job.assignedHostId = undefined;
       job.leaseExpiresAt = undefined;
       job.updatedAt = nowIso();
+      this.storage?.saveJob(job);
       requeued += 1;
     }
     return requeued;

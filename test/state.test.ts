@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { CoordinatorState } from "../src/coordinator/state.js";
 
 describe("CoordinatorState", () => {
@@ -64,5 +67,31 @@ describe("CoordinatorState", () => {
 
     expect(completed.status).toBe("completed");
     expect(completed.result?.stdout).toBe("ok\n");
+  });
+
+  it("reloads state from sqlite after restart", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "skyclaw-state-"));
+    const dbPath = path.join(tmpDir, "coordinator.db");
+
+    const stateA = new CoordinatorState({ leaseMs: 10, dbPath });
+    const host = stateA.registerHost({ name: "openclaw-d", capabilities: ["shell"] });
+    const job = stateA.enqueueJob({
+      payload: { kind: "shell", command: "bash", args: ["-lc", "echo persist"] }
+    });
+    const claim = stateA.claimJob(host.id);
+    expect(claim.job?.id).toBe(job.id);
+
+    const stateB = new CoordinatorState({ leaseMs: 10, dbPath });
+    const snapshot = stateB.snapshot();
+    expect(snapshot.hosts).toHaveLength(1);
+    expect(snapshot.jobs).toHaveLength(1);
+    expect(snapshot.jobs[0]?.id).toBe(job.id);
+
+    await new Promise((r) => setTimeout(r, 20));
+    const requeued = stateB.requeueExpiredLeases();
+    expect(requeued).toBe(1);
+    const claimAgain = stateB.claimJob(host.id);
+    expect(claimAgain.job?.id).toBe(job.id);
+    expect(claimAgain.job?.attempts).toBe(2);
   });
 });

@@ -13,6 +13,7 @@ export interface CoordinatorServerOptions {
   host?: string;
   authToken?: string;
   leaseMs?: number;
+  dbPath?: string;
 }
 
 function checkAuth(reqToken: string | undefined, configured: string | undefined): boolean {
@@ -21,7 +22,7 @@ function checkAuth(reqToken: string | undefined, configured: string | undefined)
 }
 
 export async function startCoordinatorServer(options: CoordinatorServerOptions): Promise<void> {
-  const state = new CoordinatorState({ leaseMs: options.leaseMs });
+  const state = new CoordinatorState({ leaseMs: options.leaseMs, dbPath: options.dbPath });
 
   setInterval(() => {
     state.requeueExpiredLeases();

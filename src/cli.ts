@@ -14,6 +14,7 @@ function printHelp(): void {
   process.stdout.write(`  SKYCLAW_COORDINATOR_URL=http://127.0.0.1:8787\n`);
   process.stdout.write(`  SKYCLAW_TOKEN=<shared-token>\n`);
   process.stdout.write(`  SKYCLAW_ALLOWED_COMMANDS=automaton,node,bash,sh\n`);
+  process.stdout.write(`  SKYCLAW_DB_PATH=.skyclaw/coordinator.db\n`);
 }
 
 async function postJson(url: string, body: unknown, token?: string): Promise<any> {
@@ -45,7 +46,8 @@ async function main(): Promise<void> {
       port: parseIntEnv("SKYCLAW_COORDINATOR_PORT", 8787),
       host: process.env.SKYCLAW_COORDINATOR_HOST || "0.0.0.0",
       authToken: process.env.SKYCLAW_TOKEN,
-      leaseMs: parseIntEnv("SKYCLAW_LEASE_MS", 60_000)
+      leaseMs: parseIntEnv("SKYCLAW_LEASE_MS", 60_000),
+      dbPath: process.env.SKYCLAW_DB_PATH || ".skyclaw/coordinator.db"
     });
     return;
   }
