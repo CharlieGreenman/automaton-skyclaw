@@ -53,4 +53,27 @@ export class CoordinatorStorage {
       )
       .run(job.id, job.createdAt, JSON.stringify(job));
   }
+
+  replaceAll(hosts: HostRecord[], jobs: JobRecord[]): void {
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      this.db.exec("DELETE FROM hosts;");
+      this.db.exec("DELETE FROM jobs;");
+
+      const insertHost = this.db.prepare("INSERT INTO hosts (id, json) VALUES (?, ?)");
+      for (const host of hosts) {
+        insertHost.run(host.id, JSON.stringify(host));
+      }
+
+      const insertJob = this.db.prepare("INSERT INTO jobs (id, created_at, json) VALUES (?, ?, ?)");
+      for (const job of jobs) {
+        insertJob.run(job.id, job.createdAt, JSON.stringify(job));
+      }
+
+      this.db.exec("COMMIT;");
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
+  }
 }

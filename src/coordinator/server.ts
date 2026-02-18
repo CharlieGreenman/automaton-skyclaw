@@ -103,17 +103,18 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
           sendError(res, 400, "name is required");
           return;
         }
-        const host = state.registerHost(body);
-        const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
-        if (replication.acked < requiredPeerAcks) {
-          sendError(
-            res,
-            503,
-            `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
-          );
+        const applied = await applyMutationWithQuorum(
+          state,
+          peerUrls,
+          options.authToken,
+          requiredPeerAcks,
+          () => state.registerHost(body)
+        );
+        if (!applied.ok) {
+          sendError(res, 503, applied.error);
           return;
         }
-        sendJson(res, 200, { host });
+        sendJson(res, 200, { host: applied.value });
         return;
       }
 
@@ -121,17 +122,18 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
       if (req.method === "POST" && heartbeatMatch) {
         const hostId = decodeURIComponent(heartbeatMatch[1]);
         const body = await readJson<HeartbeatRequest>(req);
-        const host = state.heartbeat(hostId, body.activeLeases);
-        const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
-        if (replication.acked < requiredPeerAcks) {
-          sendError(
-            res,
-            503,
-            `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
-          );
+        const applied = await applyMutationWithQuorum(
+          state,
+          peerUrls,
+          options.authToken,
+          requiredPeerAcks,
+          () => state.heartbeat(hostId, body.activeLeases)
+        );
+        if (!applied.ok) {
+          sendError(res, 503, applied.error);
           return;
         }
-        sendJson(res, 200, { host });
+        sendJson(res, 200, { host: applied.value });
         return;
       }
 
@@ -141,54 +143,55 @@ export async function startCoordinatorServer(options: CoordinatorServerOptions):
           sendError(res, 400, "payload is required");
           return;
         }
-        const job = state.enqueueJob(body);
-        const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
-        if (replication.acked < requiredPeerAcks) {
-          sendError(
-            res,
-            503,
-            `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
-          );
+        const applied = await applyMutationWithQuorum(
+          state,
+          peerUrls,
+          options.authToken,
+          requiredPeerAcks,
+          () => state.enqueueJob(body)
+        );
+        if (!applied.ok) {
+          sendError(res, 503, applied.error);
           return;
         }
-        sendJson(res, 200, { job });
+        sendJson(res, 200, { job: applied.value });
         return;
       }
 
       const claimMatch = pathname.match(/^\/v1\/hosts\/([^/]+)\/claim$/);
       if (req.method === "POST" && claimMatch) {
         const hostId = decodeURIComponent(claimMatch[1]);
-        const result = state.claimJob(hostId);
-        if (result.job) {
-          const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
-          if (replication.acked < requiredPeerAcks) {
-            sendError(
-              res,
-              503,
-              `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
-            );
-            return;
-          }
+        const applied = await applyMutationWithQuorum(
+          state,
+          peerUrls,
+          options.authToken,
+          requiredPeerAcks,
+          () => state.claimJob(hostId)
+        );
+        if (!applied.ok) {
+          sendError(res, 503, applied.error);
+          return;
         }
-        sendJson(res, 200, result);
+        sendJson(res, 200, applied.value);
         return;
       }
 
-      const completeMatch = pathname.match(/^\/v1\/jobs\/([^/]+)\/complete$/);
+        const completeMatch = pathname.match(/^\/v1\/jobs\/([^/]+)\/complete$/);
       if (req.method === "POST" && completeMatch) {
         const jobId = decodeURIComponent(completeMatch[1]);
         const body = await readJson<CompleteJobRequest>(req);
-        const job = state.completeJob(jobId, body);
-        const replication = await replicateSnapshotToPeers(state, peerUrls, options.authToken);
-        if (replication.acked < requiredPeerAcks) {
-          sendError(
-            res,
-            503,
-            `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
-          );
+        const applied = await applyMutationWithQuorum(
+          state,
+          peerUrls,
+          options.authToken,
+          requiredPeerAcks,
+          () => state.completeJob(jobId, body)
+        );
+        if (!applied.ok) {
+          sendError(res, 503, applied.error);
           return;
         }
-        sendJson(res, 200, { job });
+        sendJson(res, 200, { job: applied.value });
         return;
       }
 
@@ -242,6 +245,31 @@ async function replicateSnapshotToPeers(
     })
   );
   return { acked: results.filter(Boolean).length, attempted: peerUrls.length };
+}
+
+async function applyMutationWithQuorum<T>(
+  state: CoordinatorState,
+  peerUrls: string[],
+  token: string | undefined,
+  requiredPeerAcks: number,
+  mutate: () => T
+): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  const checkpoint = state.checkpoint();
+  try {
+    const value = mutate();
+    const replication = await replicateSnapshotToPeers(state, peerUrls, token);
+    if (replication.acked < requiredPeerAcks) {
+      state.restore(checkpoint);
+      return {
+        ok: false,
+        error: `replication target not met: required ${requiredPeerAcks} peer acks, got ${replication.acked}`
+      };
+    }
+    return { ok: true, value };
+  } catch (error) {
+    state.restore(checkpoint);
+    throw error;
+  }
 }
 
 async function syncFromPeers(state: CoordinatorState, peerUrls: string[], token?: string): Promise<void> {

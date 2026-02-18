@@ -222,6 +222,37 @@ export class CoordinatorState {
 
   snapshot(): CoordinatorSnapshot {
     this.requeueExpiredLeases();
+    return this.snapshotInternal();
+  }
+
+  checkpoint(): CoordinatorSnapshot {
+    return this.snapshotInternal();
+  }
+
+  restore(snapshot: CoordinatorSnapshot): void {
+    this.hosts.clear();
+    this.jobs.clear();
+
+    for (const host of snapshot.hosts || []) {
+      this.hosts.set(host.id, structuredClone(host));
+    }
+    for (const job of snapshot.jobs || []) {
+      this.jobs.set(job.id, structuredClone(job));
+    }
+
+    const maxHostVersion = Math.max(0, ...[...this.hosts.values()].map((host) => host.version || 0));
+    const maxJobVersion = Math.max(0, ...[...this.jobs.values()].map((job) => job.version || 0));
+    this.nextVersion = Math.max(maxHostVersion, maxJobVersion) + 1;
+
+    if (this.storage) {
+      this.storage.replaceAll(
+        [...this.hosts.values()].map((host) => structuredClone(host)),
+        [...this.jobs.values()].map((job) => structuredClone(job))
+      );
+    }
+  }
+
+  private snapshotInternal(): CoordinatorSnapshot {
     return {
       nodeId: this.nodeId,
       hosts: [...this.hosts.values()].map((host) => structuredClone(host)),

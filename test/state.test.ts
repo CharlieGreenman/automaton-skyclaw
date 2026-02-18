@@ -113,4 +113,20 @@ describe("CoordinatorState", () => {
     const secondMerge = nodeB.mergeSnapshot(nodeA.snapshot());
     expect(secondMerge.changed).toBe(false);
   });
+
+  it("restores checkpoint to rollback local mutations", () => {
+    const state = new CoordinatorState({ nodeId: "node-rollback" });
+    const before = state.checkpoint();
+
+    state.registerHost({ name: "temporary-host", capabilities: ["shell"] });
+    state.enqueueJob({ payload: { kind: "shell", command: "bash", args: ["-lc", "echo temp"] } });
+    const changed = state.snapshot();
+    expect(changed.hosts.length).toBeGreaterThan(0);
+    expect(changed.jobs.length).toBeGreaterThan(0);
+
+    state.restore(before);
+    const after = state.snapshot();
+    expect(after.hosts).toHaveLength(0);
+    expect(after.jobs).toHaveLength(0);
+  });
 });

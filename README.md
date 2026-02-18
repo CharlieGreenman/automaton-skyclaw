@@ -137,6 +137,7 @@ Jobs can request capabilities (`shell`, `automaton`, etc). Hosts only claim jobs
 - If all coordinator disks are lost, state is lost.
 - Coordinator writes enforce a minimum replication target (`SKYCLAW_MIN_REPLICATIONS`, default `100`).
 - With `100`, each write requires `99` successful peer replication acknowledgements.
+- Write operations are rollback-safe: if replication quorum is not met, local state is restored.
 
 ## Multi-node setup
 
