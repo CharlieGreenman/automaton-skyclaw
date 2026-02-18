@@ -111,4 +111,4 @@ Built by @Razroo as part of the Automaton/OpenClaw ecosystem.
 
 Open source. Ready to use. Waiting for your compute.
 
-Check it out: https://github.com/razroo/skyclaw
+Check it out: https://github.com/razroo/automaton-skyclaw
